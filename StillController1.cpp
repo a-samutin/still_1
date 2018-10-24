@@ -1,12 +1,16 @@
 /*
-Workflow:
- - Om power on
+Work flow:
+ - O power on
     if button pressed upon power off - goto to heater power settings
-    if stored Show heater power  for 3 sec
+    if PowerStored Show heater power  for 3 sec
+    	Show Power and %-age
+    else
+        Show only %-age
+
     Show blinking 0 for % power
     change % by encoder rotation
     apply power by button press
-    deapply power by button press
+    de-apply power by button press
 
 
 Connections (Arduino Nano)
@@ -30,23 +34,55 @@ Display
 #include "SPI.h"
 
 
-#define NDIGITS         8
-#define NDIGITS_MASK    7
+
 #define SIMULATE_60HZ
 #define encoderPinA 2
 #define encoderPinB 3
 
-
-//Connections
+#define EEPROM_ADDR 22       //address of heater element power value
+//======================================================
+// Encoder Connections
 #define ENC_PORT PORTC
+#define ENC_PIN  PINC
 #define ENC_A    PINC0       //A0
 #define ENC_B    PINC1       //A1
+#define ENC_BUT  PINC2       //A2
 #define ENC_DDR  DDRC
+#define ENC_MAX  100
+#define ENC_MIN  0
+#define ENC_NORM 25000
+#define ENC_FAST 12000
 
+volatile uint32_t dt=0;
+volatile uint8_t  rot_d=0;
+volatile uint16_t encoderPos = 0;  // a counter for the dial
+volatile uint16_t lastReportedPos = 1;   // change management
+volatile uint8_t  rotating = false;    // debounce management
+volatile uint8_t  OldEncPinState=0;
+// interrupt service routine vars
+volatile uint8_t  A_set = false;
+volatile uint8_t  B_set = false;
 
+//=======================================================
+
+// Display defines
+#define NDIGITS         8
+#define NDIGITS_MASK    7
 const int latchpin = 10 ;       //PB2       connect to RCLK
 const int clockpin = 13 ;       //PB5/SCK   connect to SCLK
 const int datapin = 11;         //PB3/MOSI connect to DIO
+#define SET_LATCH (PORTB |= _BV(PB2))
+#define CLR_LATCH (PORTB &=~_BV(PB2))
+
+//              GFEDCBA
+#define _O_ (0b11000000)
+#define _U_ (0b11000001)
+#define _E_ (0b10000110)
+#define _r_ (0b10101111)
+#define _H_ (0b10001001)
+#define _P_ (0b10001100)
+
+#define _NO_ (0xFF)    //blank
 
 uint8_t col[NDIGITS] = {
     0b10000000,
@@ -74,17 +110,14 @@ uint8_t seg[] = {
 
 uint8_t segbuf[NDIGITS] ;
 int segcnt = 0;
-//ClickEncoder *encoder;
+volatile uint8_t blinking=0;
 
-volatile uint16_t encoderPos = 0;  // a counter for the dial
-volatile uint16_t lastReportedPos = 1;   // change management
-volatile uint8_t rotating = false;    // debounce management
 
-// interrupt service routine vars
-volatile uint8_t A_set = false;
-volatile uint8_t B_set = false;
-volatile uint8_t blinking=1;
 
+
+
+#define MAX_POWER 9000
+uint16_t HeaterPower=0;
 
 
 volatile uint16_t tik=1;
@@ -98,7 +131,8 @@ void LED_irq(void)
 {
   static uint8_t cnt=0;
   static uint8_t every300ms=0;
-  digitalWrite(latchpin, LOW);
+//  digitalWrite(latchpin, LOW);
+  CLR_LATCH;
   if (blinking && every300ms)
   {
     SPI_MasterTransmit(0xFF); // select the segment
@@ -109,7 +143,8 @@ void LED_irq(void)
     SPI_MasterTransmit(segbuf[segcnt]); // select the segment
     SPI_MasterTransmit(col[segcnt]) ;   // select the digit...
   }
-  digitalWrite(latchpin, HIGH) ;
+  //digitalWrite(latchpin, HIGH) ;
+  SET_LATCH;
   segcnt ++ ;
   segcnt &= NDIGITS_MASK;
   ++cnt;
@@ -123,7 +158,7 @@ void ZeroCrossing_irq(void)
 {
 
 
-	//RODO a brezingham here
+//	TODO a brezingham here
 }
 
 #ifdef SIMULATE_60HZ
@@ -143,32 +178,57 @@ ISR(TIMER0_COMPA_vect)
    if(cnt & 1) LED_irq();  //launch a display refresh every 2mS
 }
 
+
+inline uint8_t readEncPin(uint8_t pin)
+{
+	if (ENC_PIN & (_BV(pin))) return 1;
+	return 0;
+}
+
+uint8_t enc_step()
+{
+static uint32_t old_time=0;
+  uint32_t time;
+  uint8_t ret;
+  time = micros();
+  dt   = time-old_time;
+  old_time=time;
+  if (dt> ENC_NORM) ret = 1;
+  else if (dt<ENC_FAST) ret =  3;
+  else ret = 2;
+//Serial.println(ret);
+  return ret;
+}
 // Interrupt on A changing state
 void doEncoderA() {
   // debounce
   if ( rotating ) delay (1);  // wait a little until the bouncing is done
 
   // Test transition, did things really change?
-  if ( digitalRead(encoderPinA) != A_set ) { // debounce once more
+  if (readEncPin(ENC_A) != A_set ) { // debounce once more)
     A_set = !A_set;
 
     // adjust counter + if A leads B
     if ( A_set && !B_set )
-      encoderPos += 1;
+    {
+      encoderPos += enc_step();
+    }
 
     rotating = false;  // no more debouncing until loop() hits again
   }
 }
 
+
 // Interrupt on B changing state, same as A above
 void doEncoderB() {
   if ( rotating ) delay (1);
-  if ( digitalRead(encoderPinB) != B_set ) {
+  if ( readEncPin(ENC_B) != B_set ) {
     B_set = !B_set;
     //  adjust counter - 1 if B leads A
     if ( B_set && !A_set )
-      encoderPos -= 1;
-
+    {
+      encoderPos -= enc_step();
+    }
     rotating = false;
   }
 }
@@ -208,7 +268,7 @@ void InitZeroCrossing(void)
     // turn on CTC mode (for 255 couneter we can use normal mode)
     TCCR2A |= (1 << WGM21);
     // Set CS21 bit for 1024 prescaler
-    TCCR2B =7;//|= (1 << CS20 || 1 << CS21 || 1 << CS22);
+    TCCR2B =7;//|= (1 << CS20 | 1 << CS21 | 1 << CS22);
     // enable timer compare interrupt
     TIMSK2 |= (1 << OCIE2A);
 #else
@@ -217,9 +277,54 @@ void InitZeroCrossing(void)
 
 }
 
+ISR(PCINT1_vect)
+{
+	//Serial.print('p');
+
+  uint8_t pins  = (ENC_PIN ^ OldEncPinState) & (_BV(ENC_A) | _BV(ENC_B) | _BV(ENC_BUT) );
+  OldEncPinState= ENC_PIN;
+
+  if (pins & _BV(ENC_A))
+  {
+
+	  doEncoderA();
+  }
+  if (pins & _BV(ENC_B))
+  {
+	 // Serial.print('B');
+	  doEncoderB();
+  }
+  if (pins & _BV(ENC_BUT))
+  {
+	 // Serial.print('b');
+	  if (ENC_PIN & _BV(ENC_BUT))
+	  {
+		  Serial.print('d');
+	  }
+	  else
+	  {
+		  Serial.print('p');
+	  }
+  }
+  //Serial.println(' ');
+}
 
 void InitEncoder(void)
 {
+	// pinMode(A1, INPUT);
+	// pinMode(A2, INPUT);
+	// pinMode(A3, INPUT);
+
+  ENC_DDR &= ~(_BV(ENC_A) | _BV(ENC_B) | _BV(ENC_BUT) ); // Set pins for input
+  ENC_PORT |= (_BV(ENC_A) | _BV(ENC_B) | _BV(ENC_BUT) ); //Set pull ups
+  PCICR  |= _BV(PCIE1);  //Enable Pin Change int from PCINT[15:8]
+  PCMSK1 |= (_BV(ENC_A) | _BV(ENC_B) | _BV(ENC_BUT) ); //enable int from encoder pins
+  OldEncPinState = ENC_PIN;
+
+
+
+
+/*
 pinMode(encoderPinA, INPUT);
 pinMode(encoderPinB, INPUT);
 //pinMode(clearButton, INPUT);
@@ -229,34 +334,15 @@ digitalWrite(encoderPinB, HIGH);
 //digitalWrite(clearButton, HIGH);
 
 // encoder pin on interrupt 0 (pin 2)
-attachInterrupt(0, doEncoderA, CHANGE);
+//attachInterrupt(0, doEncoderA, CHANGE);9
 // encoder pin on interrupt 1 (pin 3)
 attachInterrupt(1, doEncoderB, CHANGE);
 //  encoder = new ClickEncoder(A1, A0, A2);
-//  Init_1mS_Timer();
+*/
 
 }
 
-void setup()
-{
-  cli();
-/* unsigned long t1,t2;
-t1 = micros();
-t2 = micros();
-Serial.println(t2-t1) ; */
 
-  InitDisplay();
-  InitZeroCrossing();
-  InitEncoder();
-
-  sei();
-  Serial.begin(38400) ;
-  Serial.println("Start");
-
-
-
-    // Should auto-run at this point...
-}
 
 #define regMax (100)   //How many power levels we want
 signed short regError=regMax/2;
@@ -292,10 +378,10 @@ void DislayOver(byte pos)
 {
   if (pos<=4)
   {
-    segbuf[pos++] = 0b11000000;  //0
-    segbuf[pos++] = 0b11000001;  //U
-    segbuf[pos++] = 0b10000110;  //E
-    segbuf[pos++] = 0b10101111;  //r
+    segbuf[pos++] = _O_;  //0
+    segbuf[pos++] = _U_;  //U
+    segbuf[pos++] = _E_;  //E
+    segbuf[pos++] = _r_;  //r
   }
 }
 void DisplayWord(word num, byte pos)
@@ -330,6 +416,54 @@ void DisplayLongUint(unsigned long num)
   }
 
 }
+
+void DisplayHP(uint16_t power)
+{
+	uint8_t pos=0;
+    segbuf[pos++] = _NO_;  //0
+    segbuf[pos++] = _H_;
+    segbuf[pos++] = _P_;
+    segbuf[pos++] = _NO_;
+    DisplayWord(power, 4);
+}
+
+
+void setup()
+{
+  cli();
+/* unsigned long t1,t2;
+t1 = micros();
+t2 = micros();
+Serial.println(t2-t1) ; */
+
+  InitDisplay();
+  InitZeroCrossing();
+  InitEncoder();
+  sei();
+
+
+
+  Serial.begin(38400) ;
+  Serial.println("Start");
+  Serial.print("ENC_DDR ");
+  Serial.println(ENC_DDR);
+  Serial.print("ENC_PORT ");
+  Serial.println(ENC_PORT);
+  Serial.print("PCICR ");
+  Serial.println(PCICR);
+  HeaterPower = eeprom_read_word(( uint16_t *) EEPROM_ADDR);
+  Serial.print("HP=");
+  Serial.println(HeaterPower);
+  if (HeaterPower == 0xFF || HeaterPower>MAX_POWER) HeaterPower =0;
+HeaterPower=1234;
+  if (HeaterPower)
+  {
+      DisplayHP(HeaterPower);
+      delay(3000);
+  }
+
+
+}
 unsigned long time;
 void loop()
 {
@@ -343,9 +477,12 @@ void loop()
 //time = millis();
 
 //Serial.println(time);
+  rotating = true;
       DisplayLongUint(encoderPos);
+   //   Serial.print(" ");
+  //    Serial.print(ENC_PIN);
  //     Serial.println(tik);
-//      delay(1000);
+  //    delay(1000);
 
 //    DisplayWord(9999+2,4);
 
