@@ -53,10 +53,7 @@ Display
 #define ENC_NORM 25000
 #define ENC_FAST 12000
 
-volatile uint32_t dt=0;
-volatile uint8_t  rot_d=0;
-volatile uint16_t encoderPos = 0;  // a counter for the dial
-volatile uint16_t lastReportedPos = 1;   // change management
+volatile int16_t  encoderPos = 0;  // a counter for the dial
 volatile uint8_t  rotating = false;    // debounce management
 volatile uint8_t  OldEncPinState=0;
 // interrupt service routine vars
@@ -185,13 +182,13 @@ inline uint8_t readEncPin(uint8_t pin)
 	return 0;
 }
 
+// Do encoder acceleration
 uint8_t enc_step()
 {
-static uint32_t old_time=0;
-  uint32_t time;
+  static uint32_t old_time=0;
   uint8_t ret;
-  time = micros();
-  dt   = time-old_time;
+  uint32_t time = micros();
+  uint32_t dt   = time-old_time;
   old_time=time;
   if (dt> ENC_NORM) ret = 1;
   else if (dt<ENC_FAST) ret =  3;
@@ -199,6 +196,7 @@ static uint32_t old_time=0;
 //Serial.println(ret);
   return ret;
 }
+
 // Interrupt on A changing state
 void doEncoderA() {
   // debounce
@@ -211,7 +209,9 @@ void doEncoderA() {
     // adjust counter + if A leads B
     if ( A_set && !B_set )
     {
+
       encoderPos += enc_step();
+      if (encoderPos>ENC_MAX) encoderPos = ENC_MAX;
     }
 
     rotating = false;  // no more debouncing until loop() hits again
@@ -228,9 +228,49 @@ void doEncoderB() {
     if ( B_set && !A_set )
     {
       encoderPos -= enc_step();
+      if (encoderPos<ENC_MIN) encoderPos = ENC_MIN;
+
     }
     rotating = false;
   }
+}
+
+//Pin change 1 interrupt de-multiplexer
+ISR(PCINT1_vect)
+{
+  uint8_t pins  = (ENC_PIN ^ OldEncPinState) & (_BV(ENC_A) | _BV(ENC_B) | _BV(ENC_BUT) );
+  OldEncPinState= ENC_PIN;
+
+  if (pins & _BV(ENC_A))
+  {
+	  doEncoderA();
+  }
+  if (pins & _BV(ENC_B))
+  {
+	  doEncoderB();
+  }
+  if (pins & _BV(ENC_BUT))
+  {
+	  if (ENC_PIN & _BV(ENC_BUT))
+	  {
+		  Serial.print('d');
+	  }
+	  else
+	  {
+		  Serial.print('p');
+	  }
+  }
+  //Serial.println(' ');
+}
+
+void InitEncoder(void)
+{
+
+  ENC_DDR &= ~(_BV(ENC_A) | _BV(ENC_B) | _BV(ENC_BUT) ); // Set pins for input
+  ENC_PORT |= (_BV(ENC_A) | _BV(ENC_B) | _BV(ENC_BUT) ); //Set pull ups
+  PCICR  |= _BV(PCIE1);  //Enable Pin Change int from PCINT[15:8]
+  PCMSK1 |= (_BV(ENC_A) | _BV(ENC_B) | _BV(ENC_BUT) ); //enable int from encoder pins
+  OldEncPinState = ENC_PIN;
 }
 
 
@@ -277,70 +317,6 @@ void InitZeroCrossing(void)
 
 }
 
-ISR(PCINT1_vect)
-{
-	//Serial.print('p');
-
-  uint8_t pins  = (ENC_PIN ^ OldEncPinState) & (_BV(ENC_A) | _BV(ENC_B) | _BV(ENC_BUT) );
-  OldEncPinState= ENC_PIN;
-
-  if (pins & _BV(ENC_A))
-  {
-
-	  doEncoderA();
-  }
-  if (pins & _BV(ENC_B))
-  {
-	 // Serial.print('B');
-	  doEncoderB();
-  }
-  if (pins & _BV(ENC_BUT))
-  {
-	 // Serial.print('b');
-	  if (ENC_PIN & _BV(ENC_BUT))
-	  {
-		  Serial.print('d');
-	  }
-	  else
-	  {
-		  Serial.print('p');
-	  }
-  }
-  //Serial.println(' ');
-}
-
-void InitEncoder(void)
-{
-	// pinMode(A1, INPUT);
-	// pinMode(A2, INPUT);
-	// pinMode(A3, INPUT);
-
-  ENC_DDR &= ~(_BV(ENC_A) | _BV(ENC_B) | _BV(ENC_BUT) ); // Set pins for input
-  ENC_PORT |= (_BV(ENC_A) | _BV(ENC_B) | _BV(ENC_BUT) ); //Set pull ups
-  PCICR  |= _BV(PCIE1);  //Enable Pin Change int from PCINT[15:8]
-  PCMSK1 |= (_BV(ENC_A) | _BV(ENC_B) | _BV(ENC_BUT) ); //enable int from encoder pins
-  OldEncPinState = ENC_PIN;
-
-
-
-
-/*
-pinMode(encoderPinA, INPUT);
-pinMode(encoderPinB, INPUT);
-//pinMode(clearButton, INPUT);
-// turn on pullup resistors
-digitalWrite(encoderPinA, HIGH);
-digitalWrite(encoderPinB, HIGH);
-//digitalWrite(clearButton, HIGH);
-
-// encoder pin on interrupt 0 (pin 2)
-//attachInterrupt(0, doEncoderA, CHANGE);9
-// encoder pin on interrupt 1 (pin 3)
-attachInterrupt(1, doEncoderB, CHANGE);
-//  encoder = new ClickEncoder(A1, A0, A2);
-*/
-
-}
 
 
 
@@ -441,16 +417,9 @@ Serial.println(t2-t1) ; */
   InitEncoder();
   sei();
 
-
-
   Serial.begin(38400) ;
   Serial.println("Start");
-  Serial.print("ENC_DDR ");
-  Serial.println(ENC_DDR);
-  Serial.print("ENC_PORT ");
-  Serial.println(ENC_PORT);
-  Serial.print("PCICR ");
-  Serial.println(PCICR);
+
   HeaterPower = eeprom_read_word(( uint16_t *) EEPROM_ADDR);
   Serial.print("HP=");
   Serial.println(HeaterPower);
