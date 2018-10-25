@@ -52,13 +52,18 @@ Display
 #define ENC_MIN  0
 #define ENC_NORM 25000
 #define ENC_FAST 12000
+#define MAX_DEB 20
 
-volatile int16_t  encoderPos = 0;  // a counter for the dial
+
+volatile int16_t  gEncoderPos = 0;  // a counter for the dial
 volatile uint8_t  rotating = false;    // debounce management
 volatile uint8_t  OldEncPinState=0;
 // interrupt service routine vars
 volatile uint8_t  A_set = false;
 volatile uint8_t  B_set = false;
+uint8_t gEnc_max = ENC_MAX;
+uint8_t b_pressed =0;
+uint8_t b_not_released = 0;
 
 //=======================================================
 
@@ -107,17 +112,14 @@ uint8_t seg[] = {
 
 uint8_t segbuf[NDIGITS] ;
 int segcnt = 0;
-volatile uint8_t blinking=0;
-
-
+volatile uint8_t gBlinking=0;
 
 
 
 #define MAX_POWER 9000
-uint16_t HeaterPower=0;
-
-
-volatile uint16_t tik=1;
+#define PWR_STEP  50
+uint16_t gHeaterPower=0;
+uint16_t gRatio;
 
 
 
@@ -130,7 +132,7 @@ void LED_irq(void)
   static uint8_t every300ms=0;
 //  digitalWrite(latchpin, LOW);
   CLR_LATCH;
-  if (blinking && every300ms)
+  if (gBlinking && every300ms)
   {
     SPI_MasterTransmit(0xFF); // select the segment
     SPI_MasterTransmit(0) ;   // select the digit...
@@ -167,14 +169,39 @@ ISR(TIMER2_COMPA_vect)
 #endif //SIMULATE_60HZ
 
 
-// 1 mSec interrupts
-ISR(TIMER0_COMPA_vect)
+
+uint8_t button_pressed()
 {
-  static uint8_t cnt;
-   cnt++;
-   if(cnt & 1) LED_irq();  //launch a display refresh every 2mS
+    if (b_pressed)
+    {
+        b_pressed=0;
+        return 1;
+    }
+    return 0;
 }
 
+//Read button state
+inline uint8_t getbutton()
+{
+	return !(ENC_PIN & _BV(ENC_BUT));
+}
+
+inline void button_irq()
+{
+
+  if (getbutton())  //when contacts closed
+  {
+      if (!b_not_released)  //check if not de-bouncing
+      {
+    	  b_pressed = 1;
+      }
+      b_not_released = MAX_DEB; //start debounsing
+  }
+  else if (b_not_released)
+  {
+      --b_not_released;        //do debounsing MAX_DEB times
+  }
+}
 
 inline uint8_t readEncPin(uint8_t pin)
 {
@@ -210,8 +237,8 @@ void doEncoderA() {
     if ( A_set && !B_set )
     {
 
-      encoderPos += enc_step();
-      if (encoderPos>ENC_MAX) encoderPos = ENC_MAX;
+      gEncoderPos += enc_step();
+      if (gEncoderPos > gEnc_max) gEncoderPos = gEnc_max;
     }
 
     rotating = false;  // no more debouncing until loop() hits again
@@ -227,18 +254,27 @@ void doEncoderB() {
     //  adjust counter - 1 if B leads A
     if ( B_set && !A_set )
     {
-      encoderPos -= enc_step();
-      if (encoderPos<ENC_MIN) encoderPos = ENC_MIN;
+      gEncoderPos -= enc_step();
+      if (gEncoderPos<ENC_MIN) gEncoderPos = ENC_MIN;
 
     }
     rotating = false;
   }
 }
 
+// 1 mSec interrupts
+ISR(TIMER0_COMPA_vect)
+{
+   static uint8_t cnt;
+   cnt++;
+   if(cnt & 1) LED_irq();  //launch a display refresh every 2mS
+   button_irq();           //check and debunce button
+}
+
 //Pin change 1 interrupt de-multiplexer
 ISR(PCINT1_vect)
 {
-  uint8_t pins  = (ENC_PIN ^ OldEncPinState) & (_BV(ENC_A) | _BV(ENC_B) | _BV(ENC_BUT) );
+  uint8_t pins  = (ENC_PIN ^ OldEncPinState) & (_BV(ENC_A) | _BV(ENC_B)/* | _BV(ENC_BUT) */);
   OldEncPinState= ENC_PIN;
 
   if (pins & _BV(ENC_A))
@@ -249,6 +285,7 @@ ISR(PCINT1_vect)
   {
 	  doEncoderB();
   }
+  /*  don't using button interrupts for now. Just polling
   if (pins & _BV(ENC_BUT))
   {
 	  if (ENC_PIN & _BV(ENC_BUT))
@@ -260,7 +297,7 @@ ISR(PCINT1_vect)
 		  Serial.print('p');
 	  }
   }
-  //Serial.println(' ');
+  */
 }
 
 void InitEncoder(void)
@@ -269,7 +306,7 @@ void InitEncoder(void)
   ENC_DDR &= ~(_BV(ENC_A) | _BV(ENC_B) | _BV(ENC_BUT) ); // Set pins for input
   ENC_PORT |= (_BV(ENC_A) | _BV(ENC_B) | _BV(ENC_BUT) ); //Set pull ups
   PCICR  |= _BV(PCIE1);  //Enable Pin Change int from PCINT[15:8]
-  PCMSK1 |= (_BV(ENC_A) | _BV(ENC_B) | _BV(ENC_BUT) ); //enable int from encoder pins
+  PCMSK1 |= (_BV(ENC_A) | _BV(ENC_B)/* | _BV(ENC_BUT)*/ ); //enable int from encoder pins
   OldEncPinState = ENC_PIN;
 }
 
@@ -314,25 +351,23 @@ void InitZeroCrossing(void)
 #else
 #endif
 
-
 }
-
 
 
 
 #define regMax (100)   //How many power levels we want
 signed short regError=regMax/2;
-unsigned short regValue;             //Current power level
+unsigned short gPowerPercent;             //Current power level
 
-void  SetNewLevel(unsigned short Level)
+void  SetNewPLevel(uint8_t Level)
 {
    regError=regMax/2;
-   regValue = Level;
+   gPowerPercent = Level;
 }
 
 void ZeroCrossingInterrupt()
 {
-    regError=regError-regValue;
+    regError=regError-gPowerPercent;
     if (regError<=0)
     {
       regError=regError+regMax;
@@ -403,6 +438,45 @@ void DisplayHP(uint16_t power)
     DisplayWord(power, 4);
 }
 
+void DisplayPower(uint8_t pwr_p, uint16_t ratio)
+{
+	uint16_t watts = pwr_p * ratio;
+	if (watts) DisplayWord(watts,0);
+	else DisplayClear();
+	DisplayWord(pwr_p,4);
+}
+
+
+//Setup and save to EEPROM heater nominal power
+
+uint16_t do_gHeaterPower_setup(uint16_t power)
+{
+   uint8_t old_encmax= gEnc_max;
+   uint8_t cnt=0xFF;
+   uint8_t btn;
+   Serial.println("do_gHeaterPower_setup");
+   gEnc_max= MAX_POWER/PWR_STEP;
+   gBlinking = 1;
+   DisplayHP(power);
+   while (cnt)   //wait till button released;
+   {
+	   cnt--;
+	   btn = getbutton();
+	   if (btn) cnt=200;
+   }
+
+   while (! getbutton())
+   {
+	   power = gEncoderPos*PWR_STEP;
+	   DisplayHP(power);
+   }
+   Serial.print("upd EEPROM ");
+   Serial.println(power);
+   eeprom_update_word(( uint16_t *) EEPROM_ADDR, power);
+   gBlinking = 0;
+   gEnc_max=old_encmax;
+   return power;
+}
 
 void setup()
 {
@@ -419,36 +493,58 @@ Serial.println(t2-t1) ; */
 
   Serial.begin(38400) ;
   Serial.println("Start");
-
-  HeaterPower = eeprom_read_word(( uint16_t *) EEPROM_ADDR);
-  Serial.print("HP=");
-  Serial.println(HeaterPower);
-  if (HeaterPower == 0xFF || HeaterPower>MAX_POWER) HeaterPower =0;
-HeaterPower=1234;
-  if (HeaterPower)
+  gHeaterPower = eeprom_read_word(( uint16_t *) EEPROM_ADDR);
+  Serial.print("HP EEPROM = ");
+  Serial.println(gHeaterPower);
+  if (gHeaterPower>MAX_POWER) gHeaterPower =0;
+  if (getbutton())
   {
-      DisplayHP(HeaterPower);
+	gHeaterPower=do_gHeaterPower_setup(gHeaterPower);
+  }
+  gRatio= gHeaterPower/100;
+  Serial.print("HP ratio=");
+  Serial.println(gRatio);
+
+  gEncoderPos=0;
+  SetNewPLevel(0);
+  if (gHeaterPower)
+  {
+      DisplayHP(gHeaterPower);
       delay(3000);
   }
-
+  Serial.println(button_pressed());
+  Serial.println("end of setup");
 
 }
+
+
 unsigned long time;
 void loop()
 {
-  int16_t val;
+
     //Serial.println("Looping...") ;
-  //  delay(150) ;
-//    val+=encoder->getValue();
-//   DisplayWord(val,0);
-//   DisplayWord(tik, 4);
+
 //Serial.print("Time: ");
 //time = millis();
 
-//Serial.println(time);
-  rotating = true;
-      DisplayLongUint(encoderPos);
-   //   Serial.print(" ");
+    uint8_t pwr = gEncoderPos;
+    rotating = true;
+    SetNewPLevel(pwr);
+    DisplayPower(pwr,gRatio);
+    if (button_pressed())
+    {
+    	Serial.println(" bt1");
+    	gBlinking=1;
+    	SetNewPLevel(0);
+    	DisplayPower(pwr,0);
+    	while(!button_pressed())  // Wait for next button click
+    	{
+    		delay(50);
+    	}
+    	gBlinking=0;
+
+    }
+    delay(5);
   //    Serial.print(ENC_PIN);
  //     Serial.println(tik);
   //    delay(1000);
