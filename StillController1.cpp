@@ -129,10 +129,10 @@ uint16_t gRatio;
 void LED_irq(void)
 {
   static uint8_t cnt=0;
-  static uint8_t every300ms=0;
-//  digitalWrite(latchpin, LOW);
+  static uint8_t off=0;
+
   CLR_LATCH;
-  if (gBlinking && every300ms)
+  if (gBlinking && off)        // do not display
   {
     SPI_MasterTransmit(0xFF); // select the segment
     SPI_MasterTransmit(0) ;   // select the digit...
@@ -142,15 +142,15 @@ void LED_irq(void)
     SPI_MasterTransmit(segbuf[segcnt]); // select the segment
     SPI_MasterTransmit(col[segcnt]) ;   // select the digit...
   }
-  //digitalWrite(latchpin, HIGH) ;
+
   SET_LATCH;
   segcnt ++ ;
   segcnt &= NDIGITS_MASK;
   ++cnt;
-  if (cnt>125)
-    every300ms =1;
+  if (cnt<90)
+    off =1;
   else
-    every300ms =0;
+    off =0;
 }
 
 void ZeroCrossing_irq(void)
@@ -464,7 +464,7 @@ uint16_t do_gHeaterPower_setup(uint16_t power)
 	   btn = getbutton();
 	   if (btn) cnt=200;
    }
-
+   gEncoderPos = power/PWR_STEP;     //set current encoder position according to stored power
    while (! getbutton())
    {
 	   power = gEncoderPos*PWR_STEP;
@@ -481,10 +481,6 @@ uint16_t do_gHeaterPower_setup(uint16_t power)
 void setup()
 {
   cli();
-/* unsigned long t1,t2;
-t1 = micros();
-t2 = micros();
-Serial.println(t2-t1) ; */
 
   InitDisplay();
   InitZeroCrossing();
@@ -521,17 +517,11 @@ Serial.println(t2-t1) ; */
 unsigned long time;
 void loop()
 {
-
-    //Serial.println("Looping...") ;
-
-//Serial.print("Time: ");
-//time = millis();
-
     uint8_t pwr = gEncoderPos;
     rotating = true;
     SetNewPLevel(pwr);
     DisplayPower(pwr,gRatio);
-    if (button_pressed())
+    if (button_pressed())    //disable power temporary
     {
     	Serial.println(" bt1");
     	gBlinking=1;
@@ -541,23 +531,12 @@ void loop()
     	{
     		delay(50);
     	}
+    	gEncoderPos=pwr;
     	gBlinking=0;
 
     }
     delay(5);
-  //    Serial.print(ENC_PIN);
- //     Serial.println(tik);
-  //    delay(1000);
 
-//    DisplayWord(9999+2,4);
 
 }
-/*
 
-
-https://playground.arduino.cc/Main/RotaryEncoders
-
-ClickEncoder - https://github.com/0xPIT/encoder/tree/arduino
-
-
-*/
