@@ -64,6 +64,7 @@ volatile uint8_t  B_set = false;
 uint8_t gEnc_max = ENC_MAX;
 uint8_t b_pressed =0;
 uint8_t b_not_released = 0;
+uint8_t gStartKeyScan = 0;
 
 //=======================================================
 
@@ -123,6 +124,44 @@ uint16_t gRatio;
 
 
 
+inline void SwitchOn()
+{
+	segbuf[4] &= 0b01111111;
+}
+
+inline void SwitchOff()
+{
+	segbuf[4] |=0b10000000;
+}
+
+
+#define regMax (ENC_MAX)   //How many power levels we want
+signed short gRegError=regMax/2;
+unsigned short gPowerPercent;             //Current power level
+
+void  SetNewPLevel(uint8_t Level)
+{
+   gRegError=regMax/2;
+   gPowerPercent = Level;
+}
+
+void ZeroCrossing_irq()
+{
+    gRegError=gRegError-gPowerPercent;
+    if (gRegError<=0)
+    {
+      gRegError=gRegError+regMax;
+      SwitchOn();
+    }
+    else
+    {
+      SwitchOff();
+    }
+}
+
+
+
+
 //Takes around 10uSec when divider set to SPI_CLOCK_DIV8
 //Shoud run 8 times between 60Hz int
 //ie interval should be close but less than 1.85 mSec  -  1/60/9 Sec
@@ -142,27 +181,24 @@ void LED_irq(void)
     SPI_MasterTransmit(segbuf[segcnt]); // select the segment
     SPI_MasterTransmit(col[segcnt]) ;   // select the digit...
   }
-
   SET_LATCH;
+  sei();
   segcnt ++ ;
   segcnt &= NDIGITS_MASK;
   ++cnt;
-  if (cnt<90)
+  if (cnt<100)
     off =1;
   else
     off =0;
 }
 
-void ZeroCrossing_irq(void)
-{
 
-
-//	TODO a brezingham here
-}
+//uint32_t tick=0;
 
 #ifdef SIMULATE_60HZ
 ISR(TIMER2_COMPA_vect)
 {
+//	++tick;
   ZeroCrossing_irq();
 
 }
@@ -268,7 +304,7 @@ ISR(TIMER0_COMPA_vect)
    static uint8_t cnt;
    cnt++;
    if(cnt & 1) LED_irq();  //launch a display refresh every 2mS
-   button_irq();           //check and debunce button
+   if (gStartKeyScan) button_irq();           //check and debunce button
 }
 
 //Pin change 1 interrupt de-multiplexer
@@ -276,7 +312,7 @@ ISR(PCINT1_vect)
 {
   uint8_t pins  = (ENC_PIN ^ OldEncPinState) & (_BV(ENC_A) | _BV(ENC_B)/* | _BV(ENC_BUT) */);
   OldEncPinState= ENC_PIN;
-
+  sei();
   if (pins & _BV(ENC_A))
   {
 	  doEncoderA();
@@ -351,32 +387,6 @@ void InitZeroCrossing(void)
 #else
 #endif
 
-}
-
-
-
-#define regMax (100)   //How many power levels we want
-signed short regError=regMax/2;
-unsigned short gPowerPercent;             //Current power level
-
-void  SetNewPLevel(uint8_t Level)
-{
-   regError=regMax/2;
-   gPowerPercent = Level;
-}
-
-void ZeroCrossingInterrupt()
-{
-    regError=regError-gPowerPercent;
-    if (regError<=0)
-    {
-      regError=regError+regMax;
-  /*    SwitchOn(); */
-    }
-    else
-    {
-  /*    SwitchOff(); */
-    }
 }
 
 
@@ -508,19 +518,24 @@ void setup()
       DisplayHP(gHeaterPower);
       delay(3000);
   }
-  Serial.println(button_pressed());
+  gStartKeyScan =1;
   Serial.println("end of setup");
 
 }
 
+uint8_t gPwrOld=0;
 
 unsigned long time;
 void loop()
 {
     uint8_t pwr = gEncoderPos;
     rotating = true;
-    SetNewPLevel(pwr);
-    DisplayPower(pwr,gRatio);
+    if (gPwrOld != pwr)
+    {
+        SetNewPLevel(pwr);
+        gPwrOld=pwr;
+        DisplayPower(pwr,gRatio);
+    }
     if (button_pressed())    //disable power temporary
     {
     	Serial.println(" bt1");
@@ -532,11 +547,12 @@ void loop()
     		delay(50);
     	}
     	gEncoderPos=pwr;
+    	SetNewPLevel(pwr);
     	gBlinking=0;
 
     }
     delay(5);
-
+//    Serial.println(tick);
 
 }
 
