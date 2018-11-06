@@ -35,7 +35,7 @@ Display
 
 
 
-#define SIMULATE_60HZ
+
 #define encoderPinA 2
 #define encoderPinB 3
 
@@ -67,6 +67,19 @@ uint8_t b_not_released = 0;
 uint8_t gStartKeyScan = 0;
 
 //=======================================================
+
+// AC interrupt
+//#define SIMULATE_60HZ
+#define ACINT (INT0) // (D2)
+#define AC_DELAY 13
+uint8_t gACdelay_cnt;
+
+//Triac control
+#define SSR_PORT     PORTD
+#define SSR_PIN_REG  PIND
+#define SSR_PIN      PIND6
+#define SSR_DDR		 DDRD
+//==================
 
 // Display defines
 #define NDIGITS         8
@@ -126,12 +139,15 @@ uint16_t gRatio;
 
 inline void SwitchOn()
 {
-	segbuf[4] &= 0b01111111;
+	SSR_PORT |= _BV(SSR_PIN);
+	segbuf[4] &= 0b01111111;  //TODO remove it later
+
 }
 
 inline void SwitchOff()
 {
-	segbuf[4] |=0b10000000;
+	SSR_PORT &= ~_BV(SSR_PIN);
+	segbuf[4] |=0b10000000;   //TODO remove it later
 }
 
 
@@ -145,7 +161,7 @@ void  SetNewPLevel(uint8_t Level)
    gPowerPercent = Level;
 }
 
-void ZeroCrossing_irq()
+void do_bresenham()
 {
     gRegError=gRegError-gPowerPercent;
     if (gRegError<=0)
@@ -163,7 +179,7 @@ void ZeroCrossing_irq()
 
 
 //Takes around 10uSec when divider set to SPI_CLOCK_DIV8
-//Shoud run 8 times between 60Hz int
+//Should run 8 times between 60Hz int
 //ie interval should be close but less than 1.85 mSec  -  1/60/9 Sec
 void LED_irq(void)
 {
@@ -193,13 +209,49 @@ void LED_irq(void)
 }
 
 
-//uint32_t tick=0;
+void inline DisableAC_Int()
+{
+	EIMSK &= ~_BV(ACINT);
+
+}
+void inline EnableAC_Int()
+{
+	EIMSK |= _BV(ACINT);
+}
+
+uint8_t inline readACpin()
+{
+	return PIND & _BV(PD2);  //TODO use define
+}
 
 #ifdef SIMULATE_60HZ
 ISR(TIMER2_COMPA_vect)
 {
 //	++tick;
-  ZeroCrossing_irq();
+	do_bresenham();
+
+}
+#else
+ISR(INT0_vect)
+{
+//	DisableAC_Int();
+//	gACdelay_cnt =0;
+	for (uint8_t cnt=0;cnt<5;++cnt)
+	{
+		if (readACpin()) return;
+	}
+
+	//
+	gACdelay_cnt=0;
+	DisableAC_Int();
+	do_bresenham();
+//	SwitchOn();
+/*	for (uint8_t cnt=0;cnt<200;++cnt)
+	{
+		readACpin();
+	}
+	SwitchOff();
+*/
 
 }
 #endif //SIMULATE_60HZ
@@ -303,8 +355,15 @@ ISR(TIMER0_COMPA_vect)
 {
    static uint8_t cnt;
    cnt++;
+   gACdelay_cnt++;
+   if (gACdelay_cnt>=AC_DELAY)
+   {
+	   EnableAC_Int();
+//	   SwitchOff();
+   }
+
    if(cnt & 1) LED_irq();  //launch a display refresh every 2mS
-   if (gStartKeyScan) button_irq();           //check and debunce button
+   if (gStartKeyScan) button_irq();           //check and de-bounce button
 }
 
 //Pin change 1 interrupt de-multiplexer
@@ -369,7 +428,6 @@ void InitZeroCrossing(void)
 {
   // initialize LED digital pin as an output.
 
-
 #ifdef SIMULATE_60HZ
   //Используем Таймер 2 для 61HZ прерываний для эмуляции сети
   //set timer2 interrupt at 61HZ
@@ -385,10 +443,21 @@ void InitZeroCrossing(void)
     // enable timer compare interrupt
     TIMSK2 |= (1 << OCIE2A);
 #else
+    //TODO use defines
+    DDRD &= ~_BV(PIND2); // Set pins for input
+    PORTD &= ~_BV(PIND2); //Unset pullup
+ //   EICRA = 0;  //low level interrupt
+       EICRA = 2;  //Falling endge interrupt
+    EnableAC_Int();
 #endif
-
 }
 
+void InitSSR()
+{
+
+   SSR_DDR |= _BV(SSR_PIN);    //set as output pin
+   SSR_PORT &= ~_BV(SSR_PIN);  //set to 0;
+}
 
 void DisplayClear(/* arguments */)
 {
@@ -450,7 +519,7 @@ void DisplayHP(uint16_t power)
 
 void DisplayPower(uint8_t pwr_p, uint16_t ratio)
 {
-	uint16_t watts = pwr_p * ratio;
+	uint16_t watts = pwr_p * ratio / 10;
 	if (watts) DisplayWord(watts,0);
 	else DisplayClear();
 	DisplayWord(pwr_p,4);
@@ -495,6 +564,7 @@ void setup()
   InitDisplay();
   InitZeroCrossing();
   InitEncoder();
+  InitSSR();
   sei();
 
   Serial.begin(38400) ;
@@ -507,7 +577,7 @@ void setup()
   {
 	gHeaterPower=do_gHeaterPower_setup(gHeaterPower);
   }
-  gRatio= gHeaterPower/100;
+  gRatio= gHeaterPower/10;
   Serial.print("HP ratio=");
   Serial.println(gRatio);
 
@@ -519,6 +589,7 @@ void setup()
       delay(3000);
   }
   gStartKeyScan =1;
+  DisplayPower(0,gRatio);
   Serial.println("end of setup");
 
 }
