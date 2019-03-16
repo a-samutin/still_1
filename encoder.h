@@ -21,13 +21,11 @@
 #define ENC_FAST 12000
 #define MAX_DEB 20
 
-
+#define EncActive 0   //Active low
 volatile int16_t  gEncoderPos = 0;  // a counter for the dial
 volatile uint8_t  rotating = false;    // debounce management
 volatile uint8_t  OldEncPinState=0;
-// interrupt service routine vars
-volatile uint8_t  A_set = false;
-volatile uint8_t  B_set = false;
+
 uint8_t gEnc_max = ENC_MAX;
 uint8_t b_pressed =0;
 uint8_t b_not_released = 0;
@@ -49,7 +47,7 @@ inline uint8_t getbutton()
 	return !(ENC_PIN & _BV(ENC_BUT));
 }
 
-inline void button_irq()
+inline void do_button()
 {
 
   if (getbutton())  //when contacts closed
@@ -88,50 +86,64 @@ uint8_t enc_step()
 }
 
 // Interrupt on A changing state
-void doEncoderA() {
-  // debounce
-  if ( rotating ) delay (1);  // wait a little until the bouncing is done
 
-  // Test transition, did things really change?
-  if (readEncPin(ENC_A) != A_set ) { // debounce once more)
-    A_set = !A_set;
+void do_encoder()
+{
+  enum {
+    WaitingForTransition,
+    WaitingForBothActive,
+    WaitingForBothInactive,
+  };
 
-    // adjust counter + if A leads B
-    if ( A_set && !B_set )
-    {
+  static uint8_t state = WaitingForTransition;
 
-      gEncoderPos += enc_step();
-      if (gEncoderPos > gEnc_max) gEncoderPos = gEnc_max;
-    }
-
-    rotating = false;  // no more debouncing until loop() hits again
-  }
-}
-
-
-// Interrupt on B changing state, same as A above
-void doEncoderB() {
-  if ( rotating ) delay (1);
-  if ( readEncPin(ENC_B) != B_set ) {
-    B_set = !B_set;
-    //  adjust counter - 1 if B leads A
-    if ( B_set && !A_set )
-    {
-      gEncoderPos -= enc_step();
+  switch (state)
+  {
+    case WaitingForTransition:
+   //   cli();
+      if (readEncPin(ENC_A) == EncActive)
+      {
+// Serial.println("#1");
+        state = WaitingForBothActive;
+        if (readEncPin(ENC_B) == EncActive)
+        	gEncoderPos += enc_step();
+        else
+        	gEncoderPos -= enc_step();
+      }
+ //     sei();
       if (gEncoderPos<ENC_MIN) gEncoderPos = ENC_MIN;
+      if (gEncoderPos > gEnc_max) gEncoderPos = gEnc_max;
 
-    }
-    rotating = false;
+      break;
+    case WaitingForBothActive:
+ //     cli();
+      if ((readEncPin(ENC_A) == EncActive) && (readEncPin(ENC_B) == EncActive))
+      {
+        state = WaitingForBothInactive;
+//Serial.println("#2");
+      }
+ //     sei();
+      break;
+    case  WaitingForBothInactive:
+//      cli();
+      if ((readEncPin(ENC_A) != EncActive) && (readEncPin(ENC_B) != EncActive))
+      {
+        state = WaitingForTransition;
+//Serial.println("#3");
+      }
+//      sei();
+      break;
+
   }
-}
 
+}
 void InitEncoder(void)
 {
 
   ENC_DDR &= ~(_BV(ENC_A) | _BV(ENC_B) | _BV(ENC_BUT) ); // Set pins for input
   ENC_PORT |= (_BV(ENC_A) | _BV(ENC_B) | _BV(ENC_BUT) ); //Set pull ups
-  PCICR  |= _BV(PCIE1);  //Enable Pin Change int from PCINT[15:8]
-  PCMSK1 |= (_BV(ENC_A) | _BV(ENC_B)/* | _BV(ENC_BUT)*/ ); //enable int from encoder pins
+ // PCICR  |= _BV(PCIE1);  //Enable Pin Change int from PCINT[15:8]
+ // PCMSK1 |= (_BV(ENC_A) | _BV(ENC_B)/* | _BV(ENC_BUT)*/ ); //enable int from encoder pins
   OldEncPinState = ENC_PIN;
 }
 
